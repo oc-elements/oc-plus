@@ -1,34 +1,162 @@
 <link rel="import" href="../polymer/polymer.html">
-
-<!--
-`oc-plus`
-Element to manage PLUs on the Ordercloud platform
-
-@demo demo/index.html 
--->
+<link rel="import" href="../iron-data-table/iron-data-table.html">
+<link rel="import" href="../paper-icon-button/paper-icon-button.html">
+<link rel="import" href="../oc-grid-controls/oc-grid-controls.html">
+<link rel="import" href="../oc-iron-data-table-styles/oc-iron-data-table-styles.html">
+<link rel="import" href="../oc-core-utils/oc-api-consumer-behaviour.html">
+<link rel="import" href="../oc-connection-api/oc-connection-api.html">
+<link rel="import" href="../oc-plu-api/oc-plu-api.html">
 
 <dom-module id="oc-plus">
+
+  <style include="oc-app-styles oc-iron-data-table-styles">
+    :host {
+      display: block;
+    }
+
+    iron-data-table[empty] {
+      height: 74px;
+    }
+  </style>
+
   <template>
-    <style>
-      :host {
-        display: block;
-      }
-    </style>
-    <h2>Hello [[prop1]]</h2>
+
+      <oc-grid-controls data="[[ _items ]]" total-count="[[ _totalItems ]]" num-entries="[[ _pageSize ]]">
+        <iron-data-table items="[[ organisations ]]" empty$="[[ _isOrganisationsEmpty(organisations) ]]">
+          <data-table-column name="Name" sort-by="name" filter-by="name">
+            <template>[[ item.name ]]</template>
+          </data-table-column>
+          <data-table-column flex="0" width="80px">
+            <template>
+              <paper-icon-button icon="icons:file-download" on-tap="_downloadCsv"></paper-icon-button>
+              <paper-icon-button icon="icons:cloud-upload" on-tap="_selectFile"></paper-icon-button>
+            </template>
+          </data-table-column>
+        </iron-data-table>
+      </oc-grid-controls>
+    </paper-material>
+
+    <p id="emptyError" hidden class="error-message">No organisations found with mappable products</p>
+    <p id="loadingError" hidden class="error-message">
+      Failed to load organisations
+      <a href="javascript:void(0);" on-tap="refresh">Retry</a>
+    </p>
+
+    <input type="file" name="File" id="file" on-change="_uploadCsv" accept="text/csv" hidden>
+
+    <oc-connection-api id="connectionApi"></oc-connection-api>
+    <oc-plu-api id="pluApi"></oc-plu-api>
+
   </template>
 
   <script>
     Polymer({
-
       is: 'oc-plus',
+      behaviors: [OC.Behaviours.ApiConsumer],
 
       properties: {
-        prop1: {
-          type: String,
-          value: 'oc-plus',
-        },
+        organisationId: Number,
+        productType: String,
+        loading: {
+          type: Boolean,
+          notify: true
+        }
       },
+
+      observers: [
+        'refresh(productType, organisationId)'
+      ],
+
+      refresh: function() {
+        if (!(this.productType && this.organisationId)) {
+          return;
+        }
+
+        this.loading = true;
+        this.$.loadingError.hidden = true;
+        this.$.emptyError.hidden = true;
+        this.$.connectionApi.getConnections(this.organisationId)
+                .then(this._handleConnectionsResponse.bind(this))
+                .catch(this._handleFetchConnectionsFailed.bind(this))
+                .finally(this.set.bind(this, 'loading', false));
+      },
+      _handleConnectionsResponse: function(request) {
+        var mappableOrganisationTypes = {};
+        if (this.productType === 'local') {
+          mappableOrganisationTypes[3] = 'Franchisee';
+        }
+        else if (this.productType === 'library') {
+          mappableOrganisationTypes[2] = 'Franchisor';
+        }
+
+        this.organisations = request.response.results
+                .map(function(connection) {
+                  if (connection.toOrganisation.id === this.organisationId) {
+                    return connection.fromOrganisation;
+                  }
+                  return connection.toOrganisation;
+                }.bind(this))
+                .filter(function(organisation) {
+                  return organisation.types.find(function(type) {
+                    return type.id in mappableOrganisationTypes;
+                  })
+                })
+                .reduce(function(organisations, organisation) {
+                  var exists = organisations.find(function(org) {
+                    return org.id === organisation.id;
+                  });
+                  if (!exists) {
+                    organisations.push(organisation);
+                  }
+                  return organisations;
+                }, []);
+
+        this.$.emptyError.hidden = this.organisations.length !== 0;
+      },
+      _handleFetchConnectionsFailed: function(error) {
+        console.error(error);
+        this.organisations = [];
+        this.$.loadingError.hidden = false;
+      },
+
+      _downloadCsv: function(event) {
+        event.target.disabled = true;
+        this.$.pluApi.downloadCsv(event.model.item.id, this.productType)
+                .then(this._triggerFileDownload)
+                .catch(this.fire.bind(this, 'toast', 'Failed to download csv'))
+                .finally(this.set.bind(event.target, 'disabled', false));
+      },
+      _triggerFileDownload: function(request) {
+        var aLink = document.createElement('a'),
+                evt = document.createEvent('MouseEvents');
+        evt.initEvent('click' , true, true);
+        aLink.download = 'plu-mappings.csv';
+        aLink.href = 'data:text/csv;charset=UTF-8,' + encodeURI(request.response);
+        aLink.dispatchEvent(evt);
+      },
+
+      _selectFile: function(event) {
+        this.$.file.organisationId = event.model.item.id;
+        this.$.file.button = event.target;
+        this.$.file.click();
+      },
+      _uploadCsv: function() {
+        if (this.$.file.files.length === 0) {
+          return;
+        }
+
+        this.$.file.button.disabled = true;
+        this.$.pluApi.uploadCsv(this.$.file.organisationId, this.$.file.files[0], this.productType)
+                .then(this.fire.bind(this, 'toast', 'Successfully uploaded csv'))
+                .catch(this.fire.bind(this, 'toast', 'Failed to upload csv'))
+                .finally(this.set.bind(this.$.file.button, 'disabled', false));
+      },
+
+      _isOrganisationsEmpty: function(organisations) {
+        return organisations && organisations.length === 0;
+      }
 
     });
   </script>
+
 </dom-module>
